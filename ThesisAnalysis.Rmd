@@ -1,0 +1,863 @@
+---
+title: "ThesisAnalysis"
+author: "Zhenning"
+date: "2022/5/18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(data.table)
+library(dplyr)
+library(forecast)
+library(ggplot2)
+library(tseries)
+library(wktmo)
+library(readxl)
+library(lubridate)
+library(cowplot)
+library(stringr)
+library(xtable)
+```
+
+```{r}
+# Code to use the stmf data
+stmf = read.csv("stmf.csv",header = F)
+stmf = stmf[-1,]
+colnames(stmf) = stmf[1,]
+stmf = stmf[-1,]
+```
+
+```{r}
+world_covid = read.csv("WHO-COVID-19-global-data.csv")
+```
+
+```{r}
+eu_covid = read.csv("eu_covid_data.csv")
+```
+
+```{r}
+eu_covid_ts = function(cty_name){
+  cty_covid = eu_covid %>% 
+    filter(country==cty_name) %>%
+    filter(source=="GISAID")
+
+  cty_covid_delta = cty_covid %>% 
+    filter(variant=="B.1.617.2")
+
+  cty_covid_omicron1 = cty_covid %>% 
+    filter(variant=="BA.1")
+
+  cty_covid_omicron2 = cty_covid %>% 
+    filter(variant=="BA.2")
+
+  cty_covid1 = weekToMonth(cty_covid_delta$number_detections_variant,year=2020,wkIndex = 1)
+  cty_covid2 = weekToMonth(cty_covid_omicron1$number_detections_variant,year=2020,wkIndex = 1)
+  cty_covid3 = weekToMonth(cty_covid_omicron2$number_detections_variant,year=2020,wkIndex = 1)
+
+  cty_covid_ts = ts(cty_covid1$value,start=c(2019,12),frequency = 12)
+  
+  return(list(cty_covid1,cty_covid2,cty_covid3,cty_covid_ts))
+}
+```
+
+```{r}
+shen_covid_ts = function(cty_name1){
+  cty = stmf[stmf$CountryCode==cty_name1,]
+  cty_total = cty[cty$Sex=="b",]
+  cty_total$Year = as.numeric(cty_total$Year)
+  cty_total$Week = as.numeric(cty_total$Week)
+  cty_total$DTotal = as.numeric(cty_total$DTotal)
+
+  # Need to do explain this part
+  cty_total_month = weekToMonth(cty_total$DTotal,2000,1,wkMethod = "ISO")
+  return(cty_total_month)
+}
+```
+
+```{r}
+germany_total_month = shen_covid_ts("DEUTNP")
+#Only there need to identify
+germany_ts = ts(germany_total_month$value[1:240],start=2000,frequency = 12)
+germany_ts_full = ts(germany_total_month$value,start=2000,frequency = 12)
+```
+
+```{r}
+shen= function(ts_t,ts_f){
+  time_diff = length(ts_f)-length(ts_t)
+  
+  arima_model = auto.arima(ts_t)
+  arima_forecast = forecast(arima_model,time_diff)
+  
+  arima_plot = data.frame(
+    forecast=c(arima_forecast$fitted,arima_forecast$mean),
+    actual=ts_f,
+    forecast_up=c(arima_forecast$fitted,arima_forecast$upper[,2]),
+    forecast_lo=c(arima_forecast$fitted,arima_forecast$lower[,2]),
+    time=round(time(ts_f),3)
+  )
+  
+  arima_plott = arima_plot[length(ts_f):(length(ts_t)-frequency(ts_f))-(frequency(ts_f)==12),]
+  
+  ggplot(arima_plott)+
+    xlab("Year")+ylab("Number of Death")+
+    geom_ribbon(aes(x=time,ymin=forecast_lo,ymax=forecast_up),fill="blue",alpha=0.1)+
+    geom_line(aes(x=time,y=forecast),color="blue")+
+    geom_line(aes(x=time,y=actual))
+}
+```
+
+```{r}
+shen_covid = function(ts_t,ts_f,cty_name){
+  # ARIMA part
+  time_diff = length(ts_f)-length(ts_t)
+  
+  arima_model = auto.arima(ts_t)
+  arima_forecast = forecast(arima_model,time_diff)
+  
+  arima_plot = data.frame(
+    forecast=c(arima_forecast$fitted,arima_forecast$mean),
+    actual=ts_f,
+    forecast_up=c(arima_forecast$fitted,arima_forecast$upper[,2]),
+    forecast_lo=c(arima_forecast$fitted,arima_forecast$lower[,2]),
+    time=round(time(ts_f),3)
+  )
+  
+  arima_plot = arima_plot %>% mutate(deviate=(actual>forecast_up|actual<forecast_lo)&time>2020)
+  
+  # Data
+  covid = world_covid %>%
+    filter(Country==cty_name)
+
+  covid$month = floor_date(as.Date(covid$Date_reported),"month")
+
+  covid_month = covid %>%
+    group_by(month) %>%
+    summarise(deaths=sum(New_deaths),mean=mean(New_cases))
+
+  covid_ts = ts(covid_month,start=2020,frequency = 12)
+  covidd = data.frame(time=round(time(covid_ts),3),
+                              deaths=covid_month$deaths,
+                              cases=covid_month$mean)
+  
+  # Combining
+  arima_plotc = arima_plot[length(ts_f):(length(ts_t)-frequency(ts_f))-(frequency(ts_f)==12),]
+  arima_plott = merge(arima_plotc,covidd,by="time",all.x=T)
+  arima_plott$cases = pmin(arima_plott$cases,max(ts_f)*1.1)
+  
+  dtime = arima_plott$time[arima_plott$deviate]
+  
+  p1 = ggplot(arima_plott)+
+    xlab("Year")+ylab("Number of Death")+
+    geom_ribbon(aes(x=time,ymin=forecast_lo,ymax=forecast_up),fill="blue",alpha=0.1)+
+    geom_line(aes(x=time,y=forecast),color="blue")+
+    geom_line(aes(x=time,y=actual))+
+    geom_area(aes(x=time,y=cases),fill="red",alpha=0.1)+
+    scale_y_continuous(sec.axis = sec_axis(~ .*30,name="Monthly Cases"))+
+    geom_vline(xintercept = dtime,alpha=0.5,linetype="dotted")
+  
+  p2 = ggplot(arima_plott)+
+    xlab("Year")+ylab("Number of Death")+
+    geom_ribbon(aes(x=time,ymin=forecast_lo+deaths,ymax=forecast_up+deaths),fill="red",alpha=0.1)+
+    geom_line(aes(x=time,y=forecast+deaths),color="red")+
+    geom_line(aes(x=time,y=actual)) +
+    ggtitle(sprintf("%s",cty_name))+
+    geom_vline(xintercept = dtime,alpha=0.5,linetype="dotted")
+  
+  # Calculate the numbers need for tables
+  arima_table = data.frame(time=time(ts_f)[-(1:(length(ts_f)-time_diff))],
+                           actual=ts_f[-(1:(length(ts_f)-time_diff))],
+                           forecast=arima_forecast$mean,
+                           differ=ts_f[-(1:(length(ts_f)-time_diff))]-arima_forecast$mean,
+                           sd=(arima_forecast$upper[,1] - arima_forecast$lower[,1]) / (2 * qnorm(.5 + arima_forecast$level[1] / 200)))
+  if(frequency(ts_f)==12){
+    arima_table=arima_table[-nrow(arima_table),]
+  }
+  arima_table$p = unlist(lapply(1:nrow(arima_table), function(i){
+    return(pnorm(abs(arima_table$differ[i]),mean=0,sd=arima_table$sd[i],lower.tail = F))
+  }))
+  
+  arima_table2 = arima_table
+  arima_table2$forecast = arima_table2$forecast + arima_plott$deaths[-(1:(length(arima_plott$deaths)-time_diff+1))]
+  arima_table2$differ = arima_table2$differ - arima_plott$deaths[-(1:(length(arima_plott$deaths)-time_diff+1))]
+  
+  arima_table2$p = unlist(lapply(1:nrow(arima_table2), function(i){
+    return(pnorm(abs(arima_table2$differ[i]),mean=0,sd=arima_table2$sd[i],lower.tail = F))
+  }))
+  
+  return(list(p1,p2,arima_model,arima_table,arima_table2))
+}
+```
+
+```{r}
+shen_covid_eu = function(ts_t,ts_f,cty_name){
+  # ARIMA part
+  time_diff = length(ts_f)-length(ts_t)
+  
+  arima_model = auto.arima(ts_t)
+  arima_forecast = forecast(arima_model,time_diff)
+  
+  arima_plot = data.frame(
+    forecast=c(arima_forecast$fitted,arima_forecast$mean),
+    actual=ts_f,
+    forecast_up=c(arima_forecast$fitted,arima_forecast$upper[,2]),
+    forecast_lo=c(arima_forecast$fitted,arima_forecast$lower[,2]),
+    time=round(time(ts_f),3)
+  )
+  
+  arima_plot = arima_plot %>% mutate(deviate=(actual>forecast_up|actual<forecast_lo)&time>2020)
+  
+  # Data
+  covid = world_covid %>%
+    filter(Country==cty_name)
+
+  covid$month = floor_date(as.Date(covid$Date_reported),"month")
+
+  covid_month = covid %>%
+    group_by(month) %>%
+    summarise(deaths=sum(New_deaths),mean=mean(New_cases))
+
+  covid_ts = ts(covid_month,start=2020,frequency = 12)
+  covidd = data.frame(time=round(time(covid_ts),3),
+                              deaths=covid_month$deaths,
+                              cases=covid_month$mean)
+  
+  # For EU countries
+  eu_covid_data = eu_covid_ts(cty_name)
+  
+  # Combining
+  arima_plotc = arima_plot[length(ts_f):(length(ts_t)-frequency(ts_f))-(frequency(ts_f)==12),]
+  arima_plott = merge(arima_plotc,covidd,by="time",all.x=T)
+  arima_plott$cases = pmin(arima_plott$cases,max(ts_f)*1.1)
+  
+  dtime = arima_plott$time[arima_plott$deviate]
+  
+  p1 = ggplot(arima_plott)+
+    xlab("Year")+ylab("Number of Death")+
+    geom_ribbon(aes(x=time,ymin=forecast_lo,ymax=forecast_up),fill="blue",alpha=0.1)+
+    geom_line(aes(x=time,y=forecast),color="blue")+
+    geom_line(aes(x=time,y=actual))+
+    geom_area(aes(x=time,y=cases),fill="red",alpha=0.1)+
+    scale_y_continuous(sec.axis = sec_axis(~ .*30,name="Monthly Cases"))+
+    geom_vline(xintercept = dtime,alpha=0.5,linetype="dotted")
+  
+  # For EU countries
+  coviddd = data.frame(time=round(time(eu_covid_data[[4]]),3),
+                              delta = eu_covid_data[[1]]$value,
+                              omicron1 = eu_covid_data[[2]]$value,
+                              omicron2 = eu_covid_data[[3]]$value)
+  arima_plottt = merge(arima_plott,coviddd,by="time",all.x=T)
+  
+  p2 = ggplot(arima_plottt)+
+    xlab("Year")+ylab("Number of Death")+
+    geom_ribbon(aes(x=time,ymin=forecast_lo,ymax=forecast_up),fill="blue",alpha=0.1)+
+    geom_line(aes(x=time,y=forecast),color="blue")+
+    geom_line(aes(x=time,y=actual))+
+    geom_area(aes(x=time,y=delta),fill="black",alpha=0.3)+
+    geom_area(aes(x=time,y=omicron1),fill="black",alpha=0.2)+
+    geom_area(aes(x=time,y=omicron2),fill="black",alpha=0.1)+
+    scale_y_continuous(sec.axis = sec_axis(~ .,name="Variant Detected"))+
+    geom_vline(xintercept = dtime,alpha=0.5,linetype="dotted")
+  
+  arima_plottt = arima_plottt %>% mutate(deviate2=(actual>forecast_up+deaths|actual<forecast_lo+deaths)&time>2020)
+  dtime2 = arima_plottt$time[arima_plottt$deviate2]
+  
+  p3 = ggplot(arima_plott)+
+    xlab("Year")+ylab("Number of Death")+
+    geom_ribbon(aes(x=time,ymin=forecast_lo+deaths,ymax=forecast_up+deaths),fill="red",alpha=0.1)+
+    geom_line(aes(x=time,y=forecast+deaths),color="red")+
+    geom_line(aes(x=time,y=actual)) +
+    ggtitle(sprintf("%s",cty_name))+
+    geom_vline(xintercept = dtime2,alpha=0.5,linetype="dotted")
+  
+  # Calculate the numbers need for tables
+  arima_table = data.frame(time=time(ts_f)[-(1:(length(ts_f)-time_diff))],
+                           actual=ts_f[-(1:(length(ts_f)-time_diff))],
+                           forecast=arima_forecast$mean,
+                           differ=ts_f[-(1:(length(ts_f)-time_diff))]-arima_forecast$mean,
+                           sd=(arima_forecast$upper[,1] - arima_forecast$lower[,1]) / (2 * qnorm(.5 + arima_forecast$level[1] / 200)))
+  if(frequency(ts_f)==12){
+    arima_table=arima_table[-nrow(arima_table),]
+  }
+  arima_table$p = unlist(lapply(1:nrow(arima_table), function(i){
+    return(pnorm(abs(arima_table$differ[i]),mean=0,sd=arima_table$sd[i],lower.tail = F))
+  }))
+  
+  # For + death from COVID
+  arima_table2 = arima_table
+  arima_table2$forecast = arima_table2$forecast + arima_plottt$deaths[-(1:(length(arima_plottt$deaths)-time_diff+1))]
+  arima_table2$differ = arima_table2$differ - arima_plottt$deaths[-(1:(length(arima_plottt$deaths)-time_diff+1))]
+  
+  arima_table2$p = unlist(lapply(1:nrow(arima_table2), function(i){
+    return(pnorm(abs(arima_table2$differ[i]),mean=0,sd=arima_table2$sd[i],lower.tail = F))
+  }))
+  
+  return(list(p1,p2,p3,arima_forecast,arima_table,arima_table2))
+}
+```
+
+```{r, fig.height=2.5, fig.width=7.5}
+germany_shen = shen_covid_eu(germany_ts,germany_ts_full,"Germany")
+plot_grid(germany_shen[[1]],germany_shen[[2]],ncol=2)
+```
+
+```{r}
+germany_shen
+```
+
+
+```{r,fig.height=2.5, fig.width=7.5}
+plot(germany_shen[[3]])
+```
+
+```{r}
+# germany_shen[[5]][,-c(1,4)]
+xtable(germany_shen[[6]][,-c(1,4)])
+```
+
+
+
+```{r}
+# California
+Cali1 = read.csv("California//California_2014_2020.csv")
+Cali1 = Cali1 %>% 
+  mutate(Data_Extract_Date = "04/15/2022") %>%
+  filter(Strata=="Total Population") %>%
+  filter(Cause=="ALL") %>%
+  filter(Geography_Type=="Occurrence")
+
+Cali2 = read.csv("California//California_2021_2022.csv")
+Cali2 = Cali2 %>% 
+  filter(Strata=="Total Population") %>%
+  filter(Cause=="ALL")
+
+Cali = rbind(Cali1,Cali2)
+rm(Cali1,Cali2)
+```
+
+```{r}
+Cali_ts = ts(Cali$Count[1:70],start=2014,frequency=12)
+Cali_ts_full = ts(Cali$Count,start=2014,frequency=12)
+```
+
+```{r}
+# shen(Cali_ts,Cali_ts_full)
+```
+
+```{r}
+# Hungary
+# Hungary Total Mortality is in stmf.
+Hun = read.csv("Hungary//Hungary_pure.csv",header=T)
+Hun_total = Hun[63:93,]
+```
+
+```{r}
+hun_total_month = shen_covid_ts("HUN")
+hun_ts = ts(hun_total_month$value[1:240],start=2000,frequency = 12)
+hun_ts_full = ts(hun_total_month$value,start=2000,frequency = 12)
+```
+
+```{r, fig.height=2.5, fig.width=7.5}
+hun_shen = shen_covid(hun_ts,hun_ts_full,"Hungary")
+plot(hun_shen[[1]])
+```
+
+```{r}
+hun_shen = shen_covid_eu(hun_ts,hun_ts_full,"Hungary")
+```
+
+
+```{r}
+# hun_shen[[4]][,-c(1,4)]
+xtable(hun_shen[[5]][,-c(1,4)])
+
+```
+
+
+```{r, include=F}
+# Estonia
+Estonia = read_xlsx("Estonia//Estonia_cause_of_death.xlsx")
+colnames(Estonia)[1] = "Year"
+colnames(Estonia)[2] = "Cause of Death"
+colnames(Estonia)[3] = "Gender"
+colnames(Estonia)[4:ncol(Estonia)] = Estonia[2,4:ncol(Estonia)]
+Estonia = Estonia[-1:-2,]
+```
+
+```{r}
+Estonia = Estonia %>%
+  filter(`Cause of Death`=="All causes")
+```
+
+```{r}
+est_total_month = shen_covid_ts("EST")
+est_ts = ts(est_total_month$value[1:240],start=2000,frequency = 12)
+est_ts_full = ts(est_total_month$value,start=2000,frequency = 12)
+```
+
+```{r, fig.height=2.5, fig.width=7.5}
+estonia_shen = shen_covid_eu(est_ts,est_ts_full,"Estonia")
+plot_grid(estonia_shen[[1]],estonia_shen[[2]],ncol=2)
+```
+
+```{r}
+# estonia_shen[[5]][,-c(1,4)]
+xtable(estonia_shen[[6]][,-c(1,4)])
+```
+
+
+```{r}
+# Slovenia
+svn_total_month = shen_covid_ts("SVN")
+svn_ts = ts(svn_total_month$value[1:240],start=2000,frequency = 12)
+svn_ts_full = ts(svn_total_month$value,start=2000,frequency = 12)
+```
+
+```{r, fig.height=2.5, fig.width=7.5}
+slovenia_shen = shen_covid_eu(svn_ts,svn_ts_full,"Slovenia")
+plot_grid(slovenia_shen[[1]],slovenia_shen[[2]],ncol=2)
+```
+
+```{r}
+# slovenia_shen[[5]][,-c(1,4)]
+xtable(slovenia_shen[[6]][,-c(1,4)])
+```
+
+```{r,fig.height=5, fig.width=7.5}
+plot_grid(germany_shen[[3]],estonia_shen[[3]],slovenia_shen[[3]],hun_shen[[3]])
+```
+
+
+
+
+
+
+
+```{r}
+# Cause of death mortality
+```
+
+
+```{r}
+shen_cod_plot = function(cod_forecast,cod,cty_name="",year=2020,threshold=0,skip_total=F){
+  # Creating the data frame
+  cod_forecast_plot = data.frame(cause_of_death=cod,
+                                       real = unlist(lapply(cod_forecast,function(x){return(x[1])})),
+                                       forecast = unlist(lapply(cod_forecast,function(x){return(x[2])})),
+                                       up = unlist(lapply(cod_forecast,function(x){return(x[3])})),
+                                       low = unlist(lapply(cod_forecast,function(x){return(x[4])})))
+  
+  # Add the value for significant deviation
+  cod_forecast_plot = cod_forecast_plot %>%
+    mutate(deviate=real<low|real>up)
+  
+  cod_forecast_plot = cod_forecast_plot %>%
+    filter(real>=threshold)
+  
+  if(skip_total){
+    cod_forecast_plot = cod_forecast_plot[-1,]
+  }
+  
+  # Plot it
+  cod_plot = ggplot(cod_forecast_plot)+
+    geom_pointrange(aes(x=cause_of_death,y=forecast,ymin=low,ymax=up,color=deviate),alpha=0.5)+
+    geom_point(aes(x=cause_of_death,y=real),color="black",shape=18,size=2,alpha=0.5) +
+    coord_flip(expand = TRUE)+
+    ggtitle(sprintf("%s prediected and actual cause of death mortality, %d",cty_name,year))+
+    xlab("Causes of Death")+
+    ylab("Cause of Death Mortality")+
+    scale_color_manual(values=c("blue","red"))
+  
+  return(cod_plot)
+}
+```
+
+```{r,include=FALSE}
+# Cause of death mortality: Germany
+germany_cod = read_xlsx("Germany/Germany_year_age.xlsx")
+colnames(germany_cod)[1] = germany_cod[4,1]
+colnames(germany_cod)[2:20] = germany_cod[5,2:20]
+germany_cod = germany_cod[-5:-1,]
+
+germany_cod[,2:20] = data.frame(lapply(germany_cod[,2:20], function(x){
+  as.numeric(x)
+}))
+
+germany_cod$l65 = rowSums(germany_cod[,4:13],na.rm = T)
+germany_cod$g65 = rowSums(germany_cod[,14:18],na.rm = T)
+```
+
+```{r}
+germany_cod_ts = function(name){
+  l65 = germany_cod$l65[germany_cod[,1]==name]
+  g65 = germany_cod$g65[germany_cod[,1]==name]
+  total = germany_cod$Total[germany_cod[,1]==name]
+  return(list(l65,g65,total))
+}
+
+# Change here for l65, g65, or total
+shen_cod_germany = function(name){
+  germany_cod_ts = germany_cod_ts(name)[[1]]
+  ts_f = ts(germany_cod_ts)
+  ts_t = ts(germany_cod_ts[-length(germany_cod_ts)])
+  
+  time_diff = length(ts_f)-length(ts_t)
+  
+  arima_model = auto.arima(ts_t)
+  arima_forecast = forecast(arima_model,time_diff)
+  
+  sd = (arima_forecast$upper[,1] - arima_forecast$lower[,1]) / (2 * qnorm(.5 + arima_forecast$level[1] / 200))
+  p = pnorm(abs(ts_f[length(ts_f)]-arima_forecast$mean),mean=0,sd=sd,lower.tail=F)
+  
+  return(c(real=ts_f[length(ts_f)],
+           forecast=arima_forecast$mean,
+           up=arima_forecast$upper[,2],
+           low=arima_forecast$lower[,2],
+           sd=sd,
+           p=p))
+}
+```
+
+```{r}
+# Check the rank
+germany_cod_rank = arrange(germany_cod[1579:1660,],desc(Total)) %>%
+  mutate(rank=1:nrow(germany_cod[1579:1660,]))
+germany_cod_rank[,c(1,20)]
+```
+
+```{r}
+(germany_cod_rank[2:10,1])
+```
+
+
+```{r}
+codi = c("Diseases of the circulatory system","Neoplasms","Malignant neoplasms","Ischaemic heart diseases","Other forms of heart disease","Diseases of the respiratory system","Mental and behavioural disorders","Cerebrovascular diseases","Hypertensive diseases")
+
+germany_cod_forecast1 = lapply(codi, function(x){shen_cod_germany(x)})
+germany_cod_plot_1 = shen_cod_plot(germany_cod_forecast1,cod=codi,cty_name = "Germany")
+```
+
+```{r}
+codc = c("Pneumonia","Transport accidents","Accidents, including their sequelae","Diabetes mellitus","Influenza")
+
+germany_cod_forecast2 = lapply(codc, function(x){shen_cod_germany(x)})
+
+germany_cod_plot_2 = shen_cod_plot(germany_cod_forecast2,cod=codc,cty_name = "Germany (selected)")
+```
+
+```{r}
+germany_cod_table1 = t(as.data.frame(germany_cod_forecast1))
+rownames(germany_cod_table1) = codi
+xtable(germany_cod_table1)
+```
+
+
+```{r,fig.height=5, fig.width=7.5}
+plot_grid(germany_cod_plot_1,germany_cod_plot_2,ncol=1)
+```
+
+
+```{r,include=FALSE}
+# Cause of death mortality: Hungary
+hungary_cod = read_xlsx("Hungary/Hungary_year_cause_of_death.xlsx")
+colnames(hungary_cod) = unlist(lapply(hungary_cod[1,],function(x){gsub("Of which: ","",x)}))
+hungary_cod = hungary_cod[67:97,]
+
+# colnames(hungary_cod)[order(as.numeric(hungary_cod[nrow(hungary_cod),]),decreasing = T)]
+```
+
+```{r}
+shen_cod_hungary = function(name){
+  germany_cod_ts = as.numeric(unlist(hungary_cod[,which(colnames(hungary_cod)==name)]))
+  ts_f = ts(germany_cod_ts)
+  ts_t = ts(germany_cod_ts[-length(germany_cod_ts)])
+  
+  time_diff = length(ts_f)-length(ts_t)
+  
+  arima_model = auto.arima(ts_t)
+  arima_forecast = forecast(arima_model,time_diff)
+
+  sd = (arima_forecast$upper[,1] - arima_forecast$lower[,1]) / (2 * qnorm(.5 + arima_forecast$level[1] / 200))
+  p = pnorm(abs(ts_f[length(ts_f)]-arima_forecast$mean),mean=0,sd=sd,lower.tail=F)
+  
+  return(c(real=ts_f[length(ts_f)],
+           forecast=arima_forecast$mean,
+           up=arima_forecast$upper[,2],
+           low=arima_forecast$lower[,2],
+           sd=sd,
+           p=p))
+}
+```
+
+```{r,fig.height=3, fig.width=7.5}
+hungary_causes = c("malignant neoplasms","other ischaemic heart diseases","cerebro-vascular diseases","acute myocardial infarction","bronchitis, pulmonary emphysema and asthma","liver diseases","intentional self-harm","motor vehicle accidents")
+
+hungary_cod_forecast = lapply(hungary_causes, function(x){shen_cod_hungary(x)})
+
+shen_cod_plot(hungary_cod_forecast,cod=hungary_causes,cty_name = "Hungary")
+```
+
+```{r}
+hungary_cod_table = t(as.data.frame(hungary_cod_forecast))
+rownames(hungary_cod_table) = hungary_causes
+xtable(hungary_cod_table)
+```
+
+
+```{r,include=FALSE}
+# For Estonia
+estonia_cod = read_xlsx("Estonia/Estonia_cause_of_death.xlsx")
+
+colnames(estonia_cod)[1:3] = c("Year","Cause","Gender")
+colnames(estonia_cod)[4:37] = estonia_cod[2,4:37]
+
+estonia_cod = estonia_cod %>%
+  filter(Gender=="Males and females")
+
+estonia_cod_main = estonia_cod %>%
+  filter(!grepl('\\.', Cause))
+
+estonia_cod_ts = lapply(unique(estonia_cod_main$Cause), function(x){
+  return(as.numeric(estonia_cod_main$`Age groups total`[estonia_cod_main$Cause==x]))
+}) 
+```
+
+```{r}
+shen_cod_estonia = function(numeric_vec){
+  germany_cod_ts = numeric_vec
+  ts_f = ts(germany_cod_ts)
+  ts_t = ts(germany_cod_ts[-length(germany_cod_ts)])
+  
+  time_diff = length(ts_f)-length(ts_t)
+  
+  arima_model = auto.arima(ts_t)
+  arima_forecast = forecast(arima_model,time_diff)
+  
+  sd = (arima_forecast$upper[,1] - arima_forecast$lower[,1]) / (2 * qnorm(.5 + arima_forecast$level[1] / 200))
+  p = pnorm(abs(ts_f[length(ts_f)]-arima_forecast$mean),mean=0,sd=sd,lower.tail=F)
+  
+  return(c(real=ts_f[length(ts_f)],
+           forecast=arima_forecast$mean,
+           up=arima_forecast$upper[,2],
+           low=arima_forecast$lower[,2],
+           sd=sd,
+           p=p))
+}
+```
+
+```{r,fig.height=3, fig.width=7.5}
+estonia_cod_forecast1 = lapply(estonia_cod_ts,function(x){shen_cod_estonia(x)}) 
+
+shen_cod_plot(estonia_cod_forecast1,cod=unique(estonia_cod_main$Cause),cty_name = "Estonia",threshold = 100,skip_total = T)
+```
+
+```{r}
+estonia_cod_table = t(as.data.frame(estonia_cod_forecast1))
+rownames(estonia_cod_table) = unique(estonia_cod_main$Cause)
+xtable(estonia_cod_table)
+```
+
+```{r}
+# Can add more detailed
+```
+
+```{r, include=F}
+# Slovenia
+slovenia_cod = read_xlsx("Slovenia/Slovenia_cause_of_death.xlsx")
+slovenia_cod = slovenia_cod[-(44:84),]
+slovenia_cod = as.data.frame(t(slovenia_cod))
+slovenia_cod = slovenia_cod[,c(-1,-3)]
+colnames(slovenia_cod)[c(1,2,3)] = c("Year","Cause","Total")
+```
+
+```{r,fig.height=3, fig.width=7.5}
+slovenia_cod_ts = lapply(unique(slovenia_cod$Cause)[4:8], function(x){
+  return(as.numeric(slovenia_cod$Total[slovenia_cod$Cause==x])[-c(1,2)])
+}) 
+
+slovenia_cod_forecast1 = lapply(slovenia_cod_ts,function(x){shen_cod_estonia(x)}) 
+
+plot(shen_cod_plot(slovenia_cod_forecast1,unique(slovenia_cod$Cause)[4:8],"Slovenia"))
+```
+
+```{r}
+slovenia_cod_table = t(as.data.frame(slovenia_cod_forecast1))
+rownames(slovenia_cod_table) = unique(slovenia_cod$Cause)[4:8]
+xtable(slovenia_cod_table)
+```
+
+```{r}
+# Can try Osrednjeslovenska province 
+```
+
+```{r}
+# Singapore Cause of Death
+Singapore = read.csv(file="Singapore//Singapore_pure.csv",header = T,encoding = "UTF-8")
+Singapore_t = transpose(Singapore)
+colnames(Singapore_t) = Singapore_t[1,]
+Singapore_t = Singapore_t[-1,]
+rownames(Singapore_t) = 2021:1969
+Singapore_t = mutate_all(Singapore_t, function(x){as.numeric(sub(",","",x))})
+Singapore_cod = as.data.frame(apply(Singapore_t,2,rev))
+rm(Singapore)
+rm(Singapore_t)
+
+# colnames(Singapore_cod)[order(as.numeric(Singapore_cod[nrow(Singapore_cod),]),decreasing = T)]
+```
+
+```{r,fig.height=6, fig.width=7.5}
+Singapore_cod_main = Singapore_cod[,!str_detect(colnames(Singapore_cod),"    ")]
+
+singapore_cod_main_ts = lapply(colnames(Singapore_cod_main), function(x){
+  return(Singapore_cod_main[,colnames(Singapore_cod_main)==x])
+})
+
+shen_cod_singapore = function(numeric_vec){
+  germany_cod_ts = numeric_vec[-length(numeric_vec)]
+  ts_f = ts(germany_cod_ts)
+  ts_t = ts(germany_cod_ts[-length(germany_cod_ts)])
+  
+  time_diff = length(ts_f)-length(ts_t)
+  
+  arima_model = auto.arima(ts_t)
+  arima_forecast = forecast(arima_model,time_diff)
+  
+  sd = (arima_forecast$upper[,1] - arima_forecast$lower[,1]) / (2 * qnorm(.5 + arima_forecast$level[1] / 200))
+  p = pnorm(abs(ts_f[length(ts_f)]-arima_forecast$mean),mean=0,sd=sd,lower.tail=F)
+  
+  return(c(real=ts_f[length(ts_f)],
+           forecast=arima_forecast$mean,
+           up=arima_forecast$upper[,2],
+           low=arima_forecast$lower[,2],
+           sd=sd,
+           p=p))
+}
+
+shen_cod_singapore2 = function(numeric_vec){
+  germany_cod_ts = numeric_vec
+  ts_f = ts(germany_cod_ts)
+  ts_t = ts(germany_cod_ts[c(-1,-2)])
+
+  arima_model = auto.arima(ts_t)
+  arima_forecast = forecast(arima_model,2)
+  
+  sd = (arima_forecast$upper[,1] - arima_forecast$lower[,1]) / (2 * qnorm(.5 + arima_forecast$level[1] / 200))
+  p = pnorm(abs(ts_f[length(ts_f)]-arima_forecast$mean[2]),mean=0,sd=sd[2],lower.tail=F)
+  
+  return(c(real=ts_f[length(ts_f)],
+           forecast=arima_forecast$mean[2],
+           up=arima_forecast$upper[2,2],
+           low=arima_forecast$lower[2,2],
+           sd = sd[2],
+           p=p))
+}
+
+
+singapore_cod_forecast1 = lapply(singapore_cod_main_ts,function(x){shen_cod_singapore(x)}) 
+singapore_cod_forecast2 = lapply(singapore_cod_main_ts,function(x){shen_cod_singapore2(x)})
+
+singapore_cod_forecast_plot1 = data.frame(cause_of_death=colnames(Singapore_cod_main),
+                                       real = unlist(lapply(singapore_cod_forecast1,function(x){return(x[1])})),
+                                       forecast = unlist(lapply(singapore_cod_forecast1,function(x){return(x[2])})),
+                                       up = unlist(lapply(singapore_cod_forecast1,function(x){return(x[3])})),
+                                       low = unlist(lapply(singapore_cod_forecast1,function(x){return(x[4])})))
+
+singapore_cod_forecast_plot2 = data.frame(cause_of_death=colnames(Singapore_cod_main),
+                                       real = unlist(lapply(singapore_cod_forecast2,function(x){return(x[1])})),
+                                       forecast = unlist(lapply(singapore_cod_forecast2,function(x){return(x[2])})),
+                                       up = unlist(lapply(singapore_cod_forecast2,function(x){return(x[3])})),
+                                       low = unlist(lapply(singapore_cod_forecast2,function(x){return(x[4])})))
+
+singapore_cod_forecast_plot1 = singapore_cod_forecast_plot1
+selection = singapore_cod_forecast_plot1$real>300
+singapore_cod_forecast_plot1 = singapore_cod_forecast_plot1[selection,]
+singapore_cod_forecast_plot2 = singapore_cod_forecast_plot2
+singapore_cod_forecast_plot2 = singapore_cod_forecast_plot2[selection,]
+
+singapore_cod_forecast_plot1 = singapore_cod_forecast_plot1 %>%
+  mutate(deviate=real<low|real>up)
+singapore_cod_forecast_plot2 = singapore_cod_forecast_plot2 %>%
+  mutate(deviate=real<low|real>up)
+
+singapore_cod_plot_1 = ggplot(singapore_cod_forecast_plot1[-1,])+
+  geom_pointrange(aes(x=cause_of_death,y=forecast,ymin=low,ymax=up,color=deviate),alpha=0.5)+
+  geom_point(aes(x=cause_of_death,y=real),color="black",shape=18,size=2,alpha=0.5) +
+  coord_flip(expand = TRUE)+
+  ggtitle("Singapore prediected and actual cause of death mortality, 2020")+
+  xlab("Causes of Death")+
+  ylab("Cause of Death Mortality")+
+  scale_color_manual(values=c("blue","red"))
+
+singapore_cod_plot_2 = ggplot(singapore_cod_forecast_plot2[-1,])+
+  geom_pointrange(aes(x=cause_of_death,y=forecast,ymin=low,ymax=up,color=deviate),alpha=0.5)+
+  geom_point(aes(x=cause_of_death,y=real),color="black",shape=18,size=2,alpha=0.5) +
+  coord_flip(expand = TRUE)+
+  ggtitle("Singapore prediected and actual cause of death mortality, 2021")+
+  xlab("Causes of Death")+
+  ylab("Cause of Death Mortality")+
+  scale_color_manual(values=c("blue","red"))
+
+plot_grid(singapore_cod_plot_1,singapore_cod_plot_2,ncol=1)
+```
+
+```{r}
+singapore_cod_table1 = t(as.data.frame(singapore_cod_forecast1))
+rownames(singapore_cod_table1) = colnames(Singapore_cod_main)
+xtable(singapore_cod_table1)
+```
+
+```{r}
+singapore_cod_table2 = t(as.data.frame(singapore_cod_forecast2))
+rownames(singapore_cod_table2) = colnames(Singapore_cod_main)
+xtable(singapore_cod_table2)
+```
+
+
+```{r,fig.height=3, fig.width=7}
+singapore_total_forecast_plot = rbind(singapore_cod_forecast_plot1[1,],singapore_cod_forecast_plot2[1,])
+singapore_total_forecast_plot$year = c("2020","2021")
+
+singapore_total_plot = ggplot(singapore_total_forecast_plot)+
+  geom_pointrange(aes(x=year,y=forecast,ymin=low,ymax=up,color=deviate),alpha=0.5)+
+  geom_point(aes(x=year,y=real),color="black",shape=18,size=2,alpha=0.5) +
+  coord_flip(expand = TRUE)+
+  ggtitle("Singapore prediected and actual mortality 2020 & 2021")+
+  xlab("Year")+
+  ylab("Mortality")+
+  scale_color_manual(values=c("blue","red"))
+
+plot(singapore_total_plot)
+```
+
+
+```{r}
+# Taiwan
+Taiwan_cod = read_xlsx("Taiwan/Taiwan_cod_pure.xlsx",col_names = c("Year","Cause","Death"))
+Taiwan_cod = Taiwan_cod %>%
+  mutate(Cause_en = str_replace_all(Cause,"([^A-Za-z0-9 ])+", ""))
+```
+
+```{r}
+Taiwan_causes = Taiwan_cod$Cause_en[446:455]
+print(Taiwan_causes)
+
+Taiwan_cod_ts = lapply(Taiwan_causes, function(x){
+  return(Taiwan_cod$Death[Taiwan_cod$Cause_en==x])
+})
+```
+
+```{r,fig.height=3, fig.width=7.5}
+taiwan_cod_forecast1 = lapply(Taiwan_cod_ts,function(x){shen_cod_estonia(x)}) 
+shen_cod_plot(taiwan_cod_forecast1,cod=Taiwan_causes,"Taiwan")
+```
+
+```{r}
+taiwan_cod_table = t(as.data.frame(taiwan_cod_forecast1))
+rownames(taiwan_cod_table) = Taiwan_causes
+xtable(taiwan_cod_table)
+```
+
+
